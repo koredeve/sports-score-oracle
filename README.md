@@ -36,3 +36,18 @@ Integration smoke (needs a network): `gltest tests/integration/ -v -s`.
 ## StudioNet
 
 StudioNet is gasless — a 0 GEN balance is expected and sufficient for deploys and calls.
+
+
+## Frontend (live)
+
+React + Vite app using genlayer-js, deployed on Vercel: **https://sports-score-oracle.vercel.app**
+
+- Lists all games straight from chain (`get_game_ids` / `get_result`)
+- Owner: create games; anyone: submit a scoreboard URL and watch AI validators settle it
+- Paste your private key to transact (kept in memory only — never stored or sent anywhere); read-only mode works keyless
+
+```bash
+cd frontend && npm install && npm run dev
+```
+
+Contract address is pinned in `frontend/src/genlayer.js`.

@@ -73,6 +73,13 @@ class SportsScoreOracle(gl.Contract):
 	def total_games(self) -> u256:
 		return u256(len(self.game_ids))
 
+	@gl.public.view
+	def get_game_ids(self) -> dict:
+		ids = []
+		for i in range(len(self.game_ids)):
+			ids.append(str(self.game_ids[i]))
+		return {"ids": ids}
+
 	@gl.public.write
 	def create_game(self, game_id: str, description: str) -> None:
 		if gl.message.sender_address != self.owner_addr:
