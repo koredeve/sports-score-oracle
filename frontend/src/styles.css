@@ -111,3 +111,19 @@ footer {
   font-size: 12px;
   text-align: center;
 }
+
+.brand { display: flex; gap: 12px; align-items: flex-start; }
+.logo { font-size: 26px; color: var(--accent); line-height: 1.2; }
+.tag { font-size: 10px; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; vertical-align: middle; }
+.count { color: var(--muted); font-weight: 400; font-size: 13px; }
+.mono { font-family: ui-monospace, monospace; font-size: 13px; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.txline a { font-family: ui-monospace, monospace; }
+.linkish { background: none; border: none; color: var(--muted); font-size: 12px; padding: 0 6px; cursor: pointer; }
+.how summary { cursor: pointer; font-weight: 600; font-size: 14px; }
+.how ol { margin: 12px 0 8px; padding-left: 20px; color: var(--text); line-height: 1.6; font-size: 14px; }
+.how .hint { margin-top: 8px; }
+.skeleton { height: 60px; border-radius: 8px; background: linear-gradient(90deg, var(--border) 25%, #21262d 50%, var(--border) 75%); background-size: 200% 100%; animation: shine 1.2s infinite; }
+@keyframes shine { to { background-position: -200% 0; } }
+code { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 12px; }

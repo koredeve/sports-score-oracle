@@ -51,3 +51,16 @@ cd frontend && npm install && npm run dev
 ```
 
 Contract address is pinned in `frontend/src/genlayer.js`.
+
+### Tests
+
+```bash
+cd frontend
+npm install
+npm test        # unit tests: unit conversions, pool math, keystore encryption
+npm run smoke   # live read-only check against StudioNet
+```
+
+The wallet is fully local: keys are generated in-browser, encrypted with AES-GCM
+(PBKDF2-SHA256, 310k iterations), downloadable as a keystore backup file, and
+only ever decrypted in memory — nothing is stored or transmitted.
