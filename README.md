@@ -4,6 +4,8 @@ Publishes finalized sports results on-chain by reading live scoreboard pages thr
 
 ## Architecture
 
+**Source integrity:** every game is permanently bound at creation to a scoreboard URL under an owner-approved source prefix (`approve_source` / `revoke_source`, owner-only). `submit_result` takes no URL — validators fetch only the bound, authoritative source, so no caller can settle a game against fabricated JSON.
+
 - **User action:** owner registers a game; anyone submits a scoreboard URL once play ends.
 - **Evidence source:** the provided live scoreboard URL returning JSON `{"status": "FINAL", "home_score": n, "away_score": n}`.
 - **Non-deterministic call:** `gl.nondet.web.get()` fetches the page inside the leader function.
