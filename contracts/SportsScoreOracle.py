@@ -38,6 +38,7 @@ def _handle_leader_error(leaders_res, leader_fn) -> bool:
 @dataclass
 class Game:
 	description: str
+	source_url: str
 	status: str
 	home_score: u256
 	away_score: u256
@@ -46,6 +47,7 @@ class Game:
 
 class SportsScoreOracle(gl.Contract):
 	owner_addr: Address
+	approved_sources: TreeMap[str, str]
 	games: TreeMap[str, Game]
 	game_ids: DynArray[str]
 
@@ -73,6 +75,36 @@ class SportsScoreOracle(gl.Contract):
 	def total_games(self) -> u256:
 		return u256(len(self.game_ids))
 
+	@gl.public.write
+	def approve_source(self, url_prefix: str, name: str) -> None:
+		if gl.message.sender_address != self.owner_addr:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} Only owner may approve sources")
+		if not url_prefix.startswith("https://"):
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} Source prefix must be an https URL")
+		self.approved_sources[url_prefix] = str(name)
+
+	@gl.public.write
+	def revoke_source(self, url_prefix: str) -> None:
+		if gl.message.sender_address != self.owner_addr:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} Only owner may revoke sources")
+		if url_prefix not in self.approved_sources:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} Source prefix is not approved")
+		del self.approved_sources[url_prefix]
+
+	@gl.public.view
+	def get_approved_sources(self) -> dict:
+		prefixes = []
+		for prefix in self.approved_sources.keys():
+			prefixes.append(str(prefix))
+		return {"prefixes": prefixes}
+
+	@gl.public.view
+	def is_source_approved(self, url: str) -> bool:
+		for prefix in self.approved_sources.keys():
+			if str(url).startswith(str(prefix)):
+				return True
+		return False
+
 	@gl.public.view
 	def get_game_ids(self) -> dict:
 		ids = []
@@ -81,13 +113,22 @@ class SportsScoreOracle(gl.Contract):
 		return {"ids": ids}
 
 	@gl.public.write
-	def create_game(self, game_id: str, description: str) -> None:
+	def create_game(self, game_id: str, description: str, source_url: str) -> None:
 		if gl.message.sender_address != self.owner_addr:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} Only owner may create games")
 		if game_id in self.games:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} Game id already exists")
+		url = str(source_url)
+		approved = False
+		for prefix in self.approved_sources.keys():
+			if url.startswith(str(prefix)):
+				approved = True
+				break
+		if not approved:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} Scoreboard source is not owner-approved")
 		self.games[game_id] = Game(
 			description=description,
+			source_url=url,
 			status=STATUS_UPCOMING,
 			home_score=u256(0),
 			away_score=u256(0),
@@ -96,13 +137,14 @@ class SportsScoreOracle(gl.Contract):
 		self.game_ids.append(game_id)
 
 	@gl.public.write
-	def submit_result(self, game_id: str, source_url: str) -> None:
+	def submit_result(self, game_id: str) -> None:
 		game = self._get_game(game_id)
 		if game.status != STATUS_UPCOMING:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} Game already final")
+		bound_url = str(game.source_url)
 
 		def leader_fn() -> dict:
-			res = gl.nondet.web.get(source_url)
+			res = gl.nondet.web.get(bound_url)
 			http_status = int(res.status)
 			if http_status >= 500:
 				raise gl.vm.UserError(
@@ -157,6 +199,7 @@ class SportsScoreOracle(gl.Contract):
 		game = self._get_game(game_id)
 		return {
 			"description": game.description,
+			"source_url": game.source_url,
 			"status": game.status,
 			"home_score": game.home_score,
 			"away_score": game.away_score,

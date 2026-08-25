@@ -67,6 +67,7 @@ export default function App() {
 
   const [newId, setNewId] = useState('');
   const [newDesc, setNewDesc] = useState('');
+  const [newSource, setNewSource] = useState('');
   const [resolveId, setResolveId] = useState('');
   const [resolveUrl, setResolveUrl] = useState('');
 
@@ -123,21 +124,19 @@ export default function App() {
   }
 
   async function submitResult() {
-    if (!resolveId.trim() || !resolveUrl.trim()) return;
+    if (!resolveId.trim()) return;
     setBusy('resolve');
     setError('');
     setTx({
-      label: 'Validators are fetching the scoreboard and comparing results…',
+      label: 'Validators are fetching the approved scoreboard and comparing results…',
       hash: null,
     });
     try {
       const hash = await writeAndWait(client, 'submit_result', [
         resolveId.trim(),
-        resolveUrl.trim(),
       ]);
       setTx({ label: 'Result settled by validator consensus.', hash });
       setResolveId('');
-      setResolveUrl('');
       await refresh();
     } catch (e) {
       setError('Settle failed: ' + (e?.message ?? String(e)));
@@ -188,10 +187,17 @@ export default function App() {
       {isOwner && (
         <section className="card">
           <h2>Create game <span className="tag">owner</span></h2>
+          <p className="hint">
+            The scoreboard URL must start with an owner-approved source prefix — it is bound
+            to the game permanently and cannot be changed by any caller later.
+          </p>
           <div className="row">
             <input placeholder="game id (e.g. lakers-celtics-4)" value={newId} onChange={(e) => setNewId(e.target.value)} />
             <input placeholder="description (e.g. Lakers vs Celtics, game 4)" value={newDesc} onChange={(e) => setNewDesc(e.target.value)} />
-            <button onClick={createGame} disabled={busy === 'create'}>
+          </div>
+          <div className="row" style={{ marginTop: 8 }}>
+            <input style={{ flex: 2 }} placeholder="https://approved-scoreboard.example/…" value={newSource} onChange={(e) => setNewSource(e.target.value)} />
+            <button onClick={createGame} disabled={busy === 'create' || !newSource.trim()}>
               {busy === 'create' ? 'Creating…' : 'Create game'}
             </button>
           </div>
