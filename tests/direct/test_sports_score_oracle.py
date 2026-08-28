@@ -210,3 +210,31 @@ def test_http_error_statuses_are_classified(direct_vm, direct_deploy, direct_ali
     assert contract.is_final("game-a2") is False
     assert contract.is_final("game-b2") is False
     assert contract.total_games() == 2
+
+
+def test_empty_game_inputs_and_payload_id_mismatch(direct_vm, direct_deploy, direct_alice):
+    """Empty inputs at creation and game_id mismatch in payload are rejected."""
+    contract = _deploy(direct_vm, direct_deploy, direct_alice)
+    direct_vm.sender = direct_alice
+
+    with direct_vm.expect_revert("must not be empty"):
+        contract.create_game("  ", "desc", SCORE_URL)
+
+    with direct_vm.expect_revert("must not be empty"):
+        contract.create_game("game-1", "  ", SCORE_URL)
+
+    _create_game(direct_vm, contract, direct_alice, "game-1")
+
+    direct_vm.mock_web(
+        URL_REGEX,
+        {
+            "status": 200,
+            "body": json.dumps(
+                {"game_id": "different-game", "status": "FINAL", "home_score": 10, "away_score": 8}
+            ),
+        },
+    )
+
+    with direct_vm.expect_revert("payload game_id mismatch"):
+        contract.submit_result("game-1")
+

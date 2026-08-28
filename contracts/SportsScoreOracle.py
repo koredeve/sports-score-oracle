@@ -79,17 +79,22 @@ class SportsScoreOracle(gl.Contract):
 	def approve_source(self, url_prefix: str, name: str) -> None:
 		if gl.message.sender_address != self.owner_addr:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} Only owner may approve sources")
-		if not url_prefix.startswith("https://"):
+		clean_prefix = str(url_prefix).strip()
+		clean_name = str(name).strip()
+		if not clean_prefix.startswith("https://"):
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} Source prefix must be an https URL")
-		self.approved_sources[url_prefix] = str(name)
+		if not clean_name:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} Source name must not be empty")
+		self.approved_sources[clean_prefix] = clean_name
 
 	@gl.public.write
 	def revoke_source(self, url_prefix: str) -> None:
 		if gl.message.sender_address != self.owner_addr:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} Only owner may revoke sources")
-		if url_prefix not in self.approved_sources:
+		clean_prefix = str(url_prefix).strip()
+		if clean_prefix not in self.approved_sources:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} Source prefix is not approved")
-		del self.approved_sources[url_prefix]
+		del self.approved_sources[clean_prefix]
 
 	@gl.public.view
 	def get_approved_sources(self) -> dict:
@@ -100,8 +105,9 @@ class SportsScoreOracle(gl.Contract):
 
 	@gl.public.view
 	def is_source_approved(self, url: str) -> bool:
+		clean_url = str(url).strip()
 		for prefix in self.approved_sources.keys():
-			if str(url).startswith(str(prefix)):
+			if clean_url.startswith(str(prefix)):
 				return True
 		return False
 
@@ -116,9 +122,13 @@ class SportsScoreOracle(gl.Contract):
 	def create_game(self, game_id: str, description: str, source_url: str) -> None:
 		if gl.message.sender_address != self.owner_addr:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} Only owner may create games")
-		if game_id in self.games:
+		clean_id = str(game_id).strip()
+		clean_desc = str(description).strip()
+		url = str(source_url).strip()
+		if not clean_id or not clean_desc or not url:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} Game id, description, and source url must not be empty")
+		if clean_id in self.games:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} Game id already exists")
-		url = str(source_url)
 		approved = False
 		for prefix in self.approved_sources.keys():
 			if url.startswith(str(prefix)):
@@ -126,19 +136,20 @@ class SportsScoreOracle(gl.Contract):
 				break
 		if not approved:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} Scoreboard source is not owner-approved")
-		self.games[game_id] = Game(
-			description=description,
+		self.games[clean_id] = Game(
+			description=clean_desc,
 			source_url=url,
 			status=STATUS_UPCOMING,
 			home_score=u256(0),
 			away_score=u256(0),
 			winner="",
 		)
-		self.game_ids.append(game_id)
+		self.game_ids.append(clean_id)
 
 	@gl.public.write
 	def submit_result(self, game_id: str) -> None:
-		game = self._get_game(game_id)
+		clean_id = str(game_id).strip()
+		game = self._get_game(clean_id)
 		if game.status != STATUS_UPCOMING:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} Game already final")
 		bound_url = str(game.source_url)
@@ -158,13 +169,19 @@ class SportsScoreOracle(gl.Contract):
 			if raw_body is None:
 				raise gl.vm.UserError(f"{ERROR_EXTERNAL} Empty scoreboard body")
 			try:
-				parsed = json.loads(raw_body.decode("utf-8"))
+				if isinstance(raw_body, bytes):
+					body_str = raw_body.decode("utf-8")
+				else:
+					body_str = str(raw_body)
+				parsed = json.loads(body_str)
 			except Exception:
 				raise gl.vm.UserError(f"{ERROR_EXTERNAL} Malformed scoreboard body")
 			if not isinstance(parsed, dict):
 				raise gl.vm.UserError(f"{ERROR_EXTERNAL} Malformed scoreboard body")
 			if parsed.get("status") != "FINAL":
 				raise gl.vm.UserError(f"{ERROR_EXPECTED} Game not final yet")
+			if "game_id" in parsed and str(parsed["game_id"]).strip() != clean_id:
+				raise gl.vm.UserError(f"{ERROR_EXTERNAL} Scoreboard payload game_id mismatch")
 			try:
 				home = int(parsed["home_score"])
 				away = int(parsed["away_score"])
