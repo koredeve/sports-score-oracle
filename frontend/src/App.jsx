@@ -6,6 +6,7 @@ import {
   readGame,
   listGameIds,
   readOwner,
+  listApprovedSources,
   writeAndWait,
 } from './genlayer.js';
 import WalletCard from './WalletCard.jsx';
@@ -14,16 +15,18 @@ import { truncateHash, winnerLabel, statusClass, explorerTxUrl } from './lib.js'
 function TxToast({ label, hash, onClose }) {
   return (
     <div className="notice">
-      <strong>{label}</strong>
+      <div className="notice-header">
+        <strong>{label}</strong>
+        <button className="linkish" onClick={onClose}>✕</button>
+      </div>
       {hash && (
-        <span className="txline">
-          {' '}tx:{' '}
+        <div className="txline" style={{ marginTop: 4 }}>
+          Transaction Hash:{' '}
           <a href={explorerTxUrl(hash)} target="_blank" rel="noreferrer">
-            {truncateHash(hash)}
+            {truncateHash(hash, 12, 10)}
           </a>
-        </span>
+        </div>
       )}
-      <button className="linkish" onClick={onClose}>dismiss</button>
     </div>
   );
 }
@@ -31,25 +34,20 @@ function TxToast({ label, hash, onClose }) {
 function HowItWorks() {
   return (
     <details className="card how">
-      <summary>How settlement works — why this needs GenLayer</summary>
+      <summary>How AI settlement works — why this needs GenLayer</summary>
       <ol>
         <li>
-          <strong>Leader proposes.</strong> Anyone submits a scoreboard URL; the leader
-          execution fetches the page live and proposes the final score.
+          <strong>Source Whitelisting & Binding:</strong> Every game is permanently bound at registration to an owner-approved HTTPS scoreboard source URL. Callers cannot supply fabricated JSON endpoints.
         </li>
         <li>
-          <strong>Validators verify independently.</strong> Other AI validators re-fetch the
-          same source themselves and must see status FINAL with exactly identical scores —
-          the leader's word alone is never trusted.
+          <strong>Independent Validator Consensus:</strong> When settlement is triggered, independent AI validators fetch the live scoreboard page, verify status <code>FINAL</code> and game ID match, and must agree on the <em>exact integer score</em>.
         </li>
         <li>
-          <strong>Appeal window.</strong> A result enters GenLayer's Optimistic Democracy
-          lifecycle: accepted, appealable, then finalized permanently on-chain.
+          <strong>Optimistic Democracy Settlement:</strong> Results finalize on-chain through GenLayer consensus with zero single-source dependency.
         </li>
       </ol>
       <p className="hint">
-        Deterministic chains cannot read live web pages or agree on their meaning — this is
-        exactly what GenLayer's AI-validator consensus is for.
+        Deterministic smart contracts cannot securely read live web pages or understand unstructured web changes — GenLayer solves this natively with non-deterministic web fetching and equivalence validation.
       </p>
     </details>
   );
@@ -59,17 +57,20 @@ export default function App() {
   const [client, setClient] = useState(() => makeClient(null));
   const [me, setMe] = useState(null);
   const [games, setGames] = useState([]);
+  const [approvedSources, setApprovedSources] = useState([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [tx, setTx] = useState(null);
   const [isOwner, setIsOwner] = useState(false);
 
+  // Form states
   const [newId, setNewId] = useState('');
   const [newDesc, setNewDesc] = useState('');
   const [newSource, setNewSource] = useState('');
+  const [newPrefix, setNewPrefix] = useState('');
+  const [newPrefixName, setNewPrefixName] = useState('');
   const [resolveId, setResolveId] = useState('');
-  const [resolveUrl, setResolveUrl] = useState('');
 
   async function refresh() {
     setLoading(true);
@@ -85,6 +86,14 @@ export default function App() {
         }
       }
       setGames(rows);
+
+      try {
+        const sources = await listApprovedSources(client);
+        setApprovedSources(sources);
+      } catch {
+        setApprovedSources([]);
+      }
+
       if (me) {
         try {
           const owner = await readOwner(client);
@@ -106,15 +115,40 @@ export default function App() {
     refresh();
   }, [me]);
 
+  async function approveSource() {
+    if (!newPrefix.trim() || !newPrefixName.trim()) return;
+    setBusy('approve_source');
+    setError('');
+    try {
+      const hash = await writeAndWait(client, 'approve_source', [
+        newPrefix.trim(),
+        newPrefixName.trim(),
+      ]);
+      setTx({ label: 'Scoreboard source whitelisted successfully.', hash });
+      setNewPrefix('');
+      setNewPrefixName('');
+      await refresh();
+    } catch (e) {
+      setError('Approve source failed: ' + (e?.message ?? String(e)));
+    } finally {
+      setBusy('');
+    }
+  }
+
   async function createGame() {
-    if (!newId.trim() || !newDesc.trim()) return;
+    if (!newId.trim() || !newDesc.trim() || !newSource.trim()) return;
     setBusy('create');
     setError('');
     try {
-      const hash = await writeAndWait(client, 'create_game', [newId.trim(), newDesc.trim()]);
-      setTx({ label: 'Game created on-chain.', hash });
+      const hash = await writeAndWait(client, 'create_game', [
+        newId.trim(),
+        newDesc.trim(),
+        newSource.trim(),
+      ]);
+      setTx({ label: 'Game registered and permanently bound on-chain.', hash });
       setNewId('');
       setNewDesc('');
+      setNewSource('');
       await refresh();
     } catch (e) {
       setError('Create failed: ' + (e?.message ?? String(e)));
@@ -123,23 +157,22 @@ export default function App() {
     }
   }
 
-  async function submitResult() {
-    if (!resolveId.trim()) return;
-    setBusy('resolve');
+  async function submitResult(targetId) {
+    const gameToSettle = targetId || resolveId.trim();
+    if (!gameToSettle) return;
+    setBusy('resolve_' + gameToSettle);
     setError('');
     setTx({
-      label: 'Validators are fetching the approved scoreboard and comparing results…',
+      label: `Validators are fetching the scoreboard for "${gameToSettle}" and verifying scores…`,
       hash: null,
     });
     try {
-      const hash = await writeAndWait(client, 'submit_result', [
-        resolveId.trim(),
-      ]);
-      setTx({ label: 'Result settled by validator consensus.', hash });
+      const hash = await writeAndWait(client, 'submit_result', [gameToSettle]);
+      setTx({ label: `Result for "${gameToSettle}" settled by validator consensus!`, hash });
       setResolveId('');
       await refresh();
     } catch (e) {
-      setError('Settle failed: ' + (e?.message ?? String(e)));
+      setError('Settlement failed: ' + (e?.message ?? String(e)));
     } finally {
       setBusy('');
     }
@@ -149,28 +182,28 @@ export default function App() {
     <div className="wrap">
       <header>
         <div className="brand">
-          <span className="logo">◉</span>
+          <span className="logo">⚽</span>
           <div>
             <h1>Sports Score Oracle</h1>
             <p className="sub">
-              Final scores settled by AI-validator consensus — validators fetch the
-              scoreboard live and must agree exactly before a result finalizes.
+              Decentralized sports oracle powered by GenLayer AI-validator consensus.
+              Games permanently bind authoritative scoreboards; validators verify and agree on exact final scores.
             </p>
           </div>
         </div>
         <p className="addr">
-          Contract{' '}
+          Contract:{' '}
           <a href={EXPLORER_URL} target="_blank" rel="noreferrer">
             {truncateHash(CONTRACT_ADDRESS, 10, 8)}
           </a>{' '}
-          · StudioNet · gasless
+          · StudioNet (Gasless)
         </p>
       </header>
 
       <HowItWorks />
 
       <section className="card">
-        <h2>Wallet</h2>
+        <h2>Wallet Connection</h2>
         <WalletCard
           me={me}
           onUnlock={(pk, address) => {
@@ -185,37 +218,83 @@ export default function App() {
       </section>
 
       {isOwner && (
-        <section className="card">
-          <h2>Create game <span className="tag">owner</span></h2>
-          <p className="hint">
-            The scoreboard URL must start with an owner-approved source prefix — it is bound
-            to the game permanently and cannot be changed by any caller later.
-          </p>
-          <div className="row">
-            <input placeholder="game id (e.g. lakers-celtics-4)" value={newId} onChange={(e) => setNewId(e.target.value)} />
-            <input placeholder="description (e.g. Lakers vs Celtics, game 4)" value={newDesc} onChange={(e) => setNewDesc(e.target.value)} />
+        <section className="card admin-card">
+          <h2>Platform Admin Controls <span className="tag">Owner</span></h2>
+          
+          <div style={{ marginBottom: 16 }}>
+            <h3 style={{ fontSize: 14, margin: '0 0 8px' }}>1. Whitelist Scoreboard Source</h3>
+            <p className="hint">Approve an HTTPS domain prefix for trusted scoreboard data feeds.</p>
+            <div className="row">
+              <input
+                placeholder="Prefix URL (e.g. https://api.sportsdata.io/)"
+                value={newPrefix}
+                onChange={(e) => setNewPrefix(e.target.value)}
+              />
+              <input
+                placeholder="Provider Name (e.g. SportsDataIO)"
+                value={newPrefixName}
+                onChange={(e) => setNewPrefixName(e.target.value)}
+              />
+              <button
+                onClick={approveSource}
+                disabled={busy === 'approve_source' || !newPrefix.trim() || !newPrefixName.trim()}
+              >
+                {busy === 'approve_source' ? 'Approving…' : 'Approve Source'}
+              </button>
+            </div>
           </div>
-          <div className="row" style={{ marginTop: 8 }}>
-            <input style={{ flex: 2 }} placeholder="https://approved-scoreboard.example/…" value={newSource} onChange={(e) => setNewSource(e.target.value)} />
-            <button onClick={createGame} disabled={busy === 'create' || !newSource.trim()}>
-              {busy === 'create' ? 'Creating…' : 'Create game'}
-            </button>
+
+          <div>
+            <h3 style={{ fontSize: 14, margin: '0 0 8px' }}>2. Register New Game</h3>
+            <p className="hint">
+              Register a match. The scoreboard URL must start with an approved prefix and is permanently bound to this game.
+            </p>
+            <div className="row">
+              <input
+                placeholder="Game ID (e.g. ucl-final-2026)"
+                value={newId}
+                onChange={(e) => setNewId(e.target.value)}
+              />
+              <input
+                placeholder="Match Description (e.g. Real Madrid vs Man City)"
+                value={newDesc}
+                onChange={(e) => setNewDesc(e.target.value)}
+              />
+            </div>
+            <div className="row" style={{ marginTop: 8 }}>
+              <input
+                style={{ flex: 2 }}
+                placeholder="https://approved-source.example/game-123.json"
+                value={newSource}
+                onChange={(e) => setNewSource(e.target.value)}
+              />
+              <button
+                onClick={createGame}
+                disabled={busy === 'create' || !newId.trim() || !newDesc.trim() || !newSource.trim()}
+              >
+                {busy === 'create' ? 'Creating…' : 'Register Game'}
+              </button>
+            </div>
           </div>
         </section>
       )}
 
       <section className="card">
-        <h2>Settle a game</h2>
+        <h2>Trigger Match Settlement</h2>
         <p className="hint">
-          Paste the game id and a scoreboard URL returning{' '}
-          <code>{'{"status":"FINAL","home_score":n,"away_score":n}'}</code>. Validators
-          re-fetch it independently — expect ~a minute for consensus.
+          Anyone can trigger consensus once a match finishes. Validators independently fetch the bound scoreboard and verify scores.
         </p>
         <div className="row">
-          <input placeholder="game id" value={resolveId} onChange={(e) => setResolveId(e.target.value)} />
-          <input placeholder="https://…/scoreboard.json" value={resolveUrl} onChange={(e) => setResolveUrl(e.target.value)} />
-          <button onClick={submitResult} disabled={busy === 'resolve'}>
-            {busy === 'resolve' ? 'In consensus…' : 'Submit result'}
+          <input
+            placeholder="Enter Game ID to settle"
+            value={resolveId}
+            onChange={(e) => setResolveId(e.target.value)}
+          />
+          <button
+            onClick={() => submitResult(resolveId)}
+            disabled={Boolean(busy) || !resolveId.trim()}
+          >
+            {busy.startsWith('resolve_') ? 'Settling in Consensus…' : 'Trigger Settlement'}
           </button>
         </div>
       </section>
@@ -226,37 +305,79 @@ export default function App() {
       {error && <div className="error">{error}</div>}
 
       <section className="card">
-        <h2>Games <span className="count">{games.length}</span></h2>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <h2 style={{ margin: 0 }}>Registered Games <span className="count">({games.length})</span></h2>
+          <button className="ghost" style={{ marginTop: 0, padding: '4px 10px', fontSize: 12 }} onClick={refresh} disabled={loading}>
+            {loading ? 'Refreshing…' : '↻ Refresh'}
+          </button>
+        </div>
+
         {loading ? (
           <div className="skeleton" />
         ) : games.length === 0 ? (
-          <p className="hint">No games registered yet — connect the owner key to create the first one.</p>
+          <p className="hint">No games registered yet on this contract deployment.</p>
         ) : (
           <table>
             <thead>
-              <tr><th>ID</th><th>Match</th><th>Status</th><th>Score</th><th>Result</th></tr>
+              <tr>
+                <th>ID</th>
+                <th>Match</th>
+                <th>Status</th>
+                <th>Score</th>
+                <th>Winner</th>
+                <th>Action</th>
+              </tr>
             </thead>
             <tbody>
               {games.map((g) => (
                 <tr key={g.id}>
                   <td className="mono">{g.id}</td>
-                  <td>{g.description || '—'}</td>
+                  <td>
+                    <strong>{g.description || '—'}</strong>
+                    {g.source_url && (
+                      <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>
+                        Source: {g.source_url}
+                      </div>
+                    )}
+                  </td>
                   <td><span className={'pill ' + statusClass(g.status)}>{g.status}</span></td>
-                  <td>{g.status === 'final' ? `${g.home_score} : ${g.away_score}` : '—'}</td>
+                  <td style={{ fontWeight: g.status === 'final' ? 700 : 400 }}>
+                    {g.status === 'final' ? `${g.home_score} : ${g.away_score}` : '—'}
+                  </td>
                   <td>{g.status === 'final' ? winnerLabel(g.winner) : '—'}</td>
+                  <td>
+                    {g.status === 'upcoming' ? (
+                      <button
+                        style={{ padding: '4px 10px', fontSize: 12 }}
+                        onClick={() => submitResult(g.id)}
+                        disabled={Boolean(busy)}
+                      >
+                        {busy === 'resolve_' + g.id ? 'Settling…' : '⚡ Settle'}
+                      </button>
+                    ) : (
+                      <span style={{ fontSize: 12, color: 'var(--ok)' }}>✓ Finalized</span>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         )}
-        <button className="ghost" onClick={refresh}>Refresh</button>
       </section>
 
+      {approvedSources.length > 0 && (
+        <section className="card">
+          <h2>Approved Scoreboard Domains <span className="count">({approvedSources.length})</span></h2>
+          <ul style={{ margin: 0, paddingLeft: 20, fontSize: 13, color: 'var(--muted)' }}>
+            {approvedSources.map((prefix, idx) => (
+              <li key={idx} className="mono" style={{ margin: '4px 0' }}>{prefix}</li>
+            ))}
+          </ul>
+        </section>
+      )}
+
       <footer>
-        <a href="https://github.com/koredeve/sports-score-oracle" target="_blank" rel="noreferrer">source</a>
-        {' · '}
-        <a href={EXPLORER_URL} target="_blank" rel="noreferrer">contract on explorer</a>
-        {' · built on GenLayer StudioNet — results are appealable before finalization'}
+        <p>Built on GenLayer StudioNet · Non-Deterministic AI Consensus</p>
       </footer>
     </div>
   );

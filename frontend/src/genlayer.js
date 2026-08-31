@@ -36,6 +36,15 @@ export async function readOwner(client) {
   });
 }
 
+export async function listApprovedSources(client) {
+  const res = await client.readContract({
+    address: CONTRACT_ADDRESS,
+    functionName: 'get_approved_sources',
+    args: [],
+  });
+  return (res && res.prefixes) || [];
+}
+
 export async function writeAndWait(client, functionName, args) {
   const hash = await client.writeContract({
     address: CONTRACT_ADDRESS,
@@ -45,3 +54,4 @@ export async function writeAndWait(client, functionName, args) {
   await client.waitForTransactionReceipt({ hash, retries: 400 });
   return hash;
 }
+
