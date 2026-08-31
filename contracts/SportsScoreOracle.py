@@ -17,6 +17,8 @@ WINNER_HOME = "home"
 WINNER_AWAY = "away"
 WINNER_DRAW = "draw"
 
+MIN_SOURCES = 2
+
 
 def _handle_leader_error(leaders_res, leader_fn) -> bool:
 	leader_msg = leaders_res.message if hasattr(leaders_res, "message") else ""
@@ -38,11 +40,12 @@ def _handle_leader_error(leaders_res, leader_fn) -> bool:
 @dataclass
 class Game:
 	description: str
-	source_url: str
+	sources: DynArray[str]
 	status: str
 	home_score: u256
 	away_score: u256
 	winner: str
+	corroborated_sources: u256
 
 
 class SportsScoreOracle(gl.Contract):
@@ -55,7 +58,7 @@ class SportsScoreOracle(gl.Contract):
 		self.owner_addr = gl.message.sender_address
 
 	def _get_game(self, game_id: str) -> Game:
-		game = self.games.get(game_id)
+		game = self.games.get(str(game_id))
 		if game is None:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} Unknown game id")
 		return game
@@ -66,6 +69,13 @@ class SportsScoreOracle(gl.Contract):
 		if away > home:
 			return WINNER_AWAY
 		return WINNER_DRAW
+
+	def _is_url_approved(self, url: str) -> bool:
+		clean = str(url).strip()
+		for prefix in self.approved_sources.keys():
+			if clean.startswith(str(prefix)):
+				return True
+		return False
 
 	@gl.public.view
 	def owner(self) -> str:
@@ -105,11 +115,7 @@ class SportsScoreOracle(gl.Contract):
 
 	@gl.public.view
 	def is_source_approved(self, url: str) -> bool:
-		clean_url = str(url).strip()
-		for prefix in self.approved_sources.keys():
-			if clean_url.startswith(str(prefix)):
-				return True
-		return False
+		return self._is_url_approved(url)
 
 	@gl.public.view
 	def get_game_ids(self) -> dict:
@@ -119,30 +125,39 @@ class SportsScoreOracle(gl.Contract):
 		return {"ids": ids}
 
 	@gl.public.write
-	def create_game(self, game_id: str, description: str, source_url: str) -> None:
+	def create_game(self, game_id: str, description: str, source_urls: DynArray[str]) -> None:
 		if gl.message.sender_address != self.owner_addr:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} Only owner may create games")
 		clean_id = str(game_id).strip()
 		clean_desc = str(description).strip()
-		url = str(source_url).strip()
-		if not clean_id or not clean_desc or not url:
-			raise gl.vm.UserError(f"{ERROR_EXPECTED} Game id, description, and source url must not be empty")
+		if not clean_id or not clean_desc:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} Game id and description must not be empty")
 		if clean_id in self.games:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} Game id already exists")
-		approved = False
-		for prefix in self.approved_sources.keys():
-			if url.startswith(str(prefix)):
-				approved = True
-				break
-		if not approved:
-			raise gl.vm.UserError(f"{ERROR_EXPECTED} Scoreboard source is not owner-approved")
+		if len(source_urls) < MIN_SOURCES:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} At least {str(MIN_SOURCES)} independent source URLs required for corroboration")
+
+		clean_sources = []
+		seen = set()
+		for i in range(len(source_urls)):
+			url = str(source_urls[i]).strip()
+			if not url:
+				raise gl.vm.UserError(f"{ERROR_EXPECTED} Source URL cannot be empty")
+			if not self._is_url_approved(url):
+				raise gl.vm.UserError(f"{ERROR_EXPECTED} Scoreboard source is not owner-approved: {url}")
+			if url in seen:
+				raise gl.vm.UserError(f"{ERROR_EXPECTED} Duplicate source URL in registration")
+			seen.add(url)
+			clean_sources.append(url)
+
 		self.games[clean_id] = Game(
 			description=clean_desc,
-			source_url=url,
+			sources=clean_sources,
 			status=STATUS_UPCOMING,
 			home_score=u256(0),
 			away_score=u256(0),
 			winner="",
+			corroborated_sources=u256(0),
 		)
 		self.game_ids.append(clean_id)
 
@@ -152,44 +167,74 @@ class SportsScoreOracle(gl.Contract):
 		game = self._get_game(clean_id)
 		if game.status != STATUS_UPCOMING:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} Game already final")
-		bound_url = str(game.source_url)
+
+		urls = []
+		for i in range(len(game.sources)):
+			urls.append(str(game.sources[i]))
 
 		def leader_fn() -> dict:
-			res = gl.nondet.web.get(bound_url)
-			http_status = int(res.status)
-			if http_status >= 500:
+			valid_reports = []
+			for url in urls:
+				try:
+					res = gl.nondet.web.get(url)
+				except Exception:
+					continue
+				http_status = int(res.status)
+				if http_status != 200:
+					continue
+				raw_body = res.body
+				if raw_body is None:
+					continue
+				try:
+					if isinstance(raw_body, bytes):
+						body_str = raw_body.decode("utf-8")
+					else:
+						body_str = str(raw_body)
+					parsed = json.loads(body_str)
+				except Exception:
+					continue
+				if not isinstance(parsed, dict):
+					continue
+
+				# Strict Event Identity Check: payload must contain matching game_id
+				payload_game_id = str(parsed.get("game_id", "")).strip()
+				if payload_game_id != clean_id:
+					continue
+
+				# Status must be FINAL
+				if str(parsed.get("status", "")).strip().upper() != "FINAL":
+					continue
+
+				try:
+					home = int(parsed["home_score"])
+					away = int(parsed["away_score"])
+				except Exception:
+					continue
+				if home < 0 or away < 0:
+					continue
+
+				valid_reports.append({"home": int(home), "away": int(away), "source": url})
+
+			# Multi-Provider Corroboration: must have at least MIN_SOURCES agreeing
+			if len(valid_reports) < MIN_SOURCES:
 				raise gl.vm.UserError(
-					f"{ERROR_TRANSIENT} Scoreboard returned HTTP {http_status}"
+					f"{ERROR_TRANSIENT} Insufficient live independent provider reports ({len(valid_reports)}/{len(urls)}) for game {clean_id}"
 				)
-			if http_status >= 400:
-				raise gl.vm.UserError(
-					f"{ERROR_EXTERNAL} Scoreboard returned HTTP {http_status}"
-				)
-			raw_body = res.body
-			if raw_body is None:
-				raise gl.vm.UserError(f"{ERROR_EXTERNAL} Empty scoreboard body")
-			try:
-				if isinstance(raw_body, bytes):
-					body_str = raw_body.decode("utf-8")
-				else:
-					body_str = str(raw_body)
-				parsed = json.loads(body_str)
-			except Exception:
-				raise gl.vm.UserError(f"{ERROR_EXTERNAL} Malformed scoreboard body")
-			if not isinstance(parsed, dict):
-				raise gl.vm.UserError(f"{ERROR_EXTERNAL} Malformed scoreboard body")
-			if parsed.get("status") != "FINAL":
-				raise gl.vm.UserError(f"{ERROR_EXPECTED} Game not final yet")
-			if "game_id" in parsed and str(parsed["game_id"]).strip() != clean_id:
-				raise gl.vm.UserError(f"{ERROR_EXTERNAL} Scoreboard payload game_id mismatch")
-			try:
-				home = int(parsed["home_score"])
-				away = int(parsed["away_score"])
-			except Exception:
-				raise gl.vm.UserError(f"{ERROR_EXTERNAL} Missing scores in scoreboard body")
-			if home < 0 or away < 0:
-				raise gl.vm.UserError(f"{ERROR_EXTERNAL} Negative score in scoreboard body")
-			return {"home": int(home), "away": int(away)}
+
+			# All independent providers must corroborate the exact same final scores
+			target_home = valid_reports[0]["home"]
+			target_away = valid_reports[0]["away"]
+			for r in valid_reports[1:]:
+				if r["home"] != target_home or r["away"] != target_away:
+					raise gl.vm.UserError(
+						f"{ERROR_EXPECTED} Independent providers disagree on final score for {clean_id}"
+					)
+
+			return {
+				"home": int(target_home),
+				"away": int(target_away),
+				"corroborated": len(valid_reports),
+			}
 
 		def validator_fn(leaders_res: gl.vm.Result) -> bool:
 			if not isinstance(leaders_res, gl.vm.Return):
@@ -197,10 +242,15 @@ class SportsScoreOracle(gl.Contract):
 			try:
 				leader_home = int(leaders_res.calldata.get("home", -1))
 				leader_away = int(leaders_res.calldata.get("away", -1))
+				leader_corrob = int(leaders_res.calldata.get("corroborated", 0))
 				fresh = leader_fn()
 			except Exception:
 				return False
-			return leader_home == int(fresh["home"]) and leader_away == int(fresh["away"])
+			return (
+				leader_home == int(fresh["home"])
+				and leader_away == int(fresh["away"])
+				and leader_corrob == int(fresh["corroborated"])
+			)
 
 		result = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
 
@@ -209,18 +259,23 @@ class SportsScoreOracle(gl.Contract):
 		game.home_score = home_val
 		game.away_score = away_val
 		game.winner = self._winner_for(int(home_val), int(away_val))
+		game.corroborated_sources = u256(int(result["corroborated"]))
 		game.status = STATUS_FINAL
 
 	@gl.public.view
 	def get_result(self, game_id: str) -> dict:
 		game = self._get_game(game_id)
+		sources_list = []
+		for i in range(len(game.sources)):
+			sources_list.append(str(game.sources[i]))
 		return {
 			"description": game.description,
-			"source_url": game.source_url,
+			"sources": sources_list,
 			"status": game.status,
 			"home_score": game.home_score,
 			"away_score": game.away_score,
 			"winner": game.winner,
+			"corroborated_sources": game.corroborated_sources,
 		}
 
 	@gl.public.view

@@ -67,7 +67,8 @@ export default function App() {
   // Form states
   const [newId, setNewId] = useState('');
   const [newDesc, setNewDesc] = useState('');
-  const [newSource, setNewSource] = useState('');
+  const [newSourceA, setNewSourceA] = useState('');
+  const [newSourceB, setNewSourceB] = useState('');
   const [newPrefix, setNewPrefix] = useState('');
   const [newPrefixName, setNewPrefixName] = useState('');
   const [resolveId, setResolveId] = useState('');
@@ -136,19 +137,20 @@ export default function App() {
   }
 
   async function createGame() {
-    if (!newId.trim() || !newDesc.trim() || !newSource.trim()) return;
+    if (!newId.trim() || !newDesc.trim() || !newSourceA.trim() || !newSourceB.trim()) return;
     setBusy('create');
     setError('');
     try {
       const hash = await writeAndWait(client, 'create_game', [
         newId.trim(),
         newDesc.trim(),
-        newSource.trim(),
+        [newSourceA.trim(), newSourceB.trim()],
       ]);
-      setTx({ label: 'Game registered and permanently bound on-chain.', hash });
+      setTx({ label: 'Game registered with multi-provider corroboration on-chain.', hash });
       setNewId('');
       setNewDesc('');
-      setNewSource('');
+      setNewSourceA('');
+      setNewSourceB('');
       await refresh();
     } catch (e) {
       setError('Create failed: ' + (e?.message ?? String(e)));
@@ -245,9 +247,9 @@ export default function App() {
           </div>
 
           <div>
-            <h3 style={{ fontSize: 14, margin: '0 0 8px' }}>2. Register New Game</h3>
+            <h3 style={{ fontSize: 14, margin: '0 0 8px' }}>2. Register New Game (Multi-Provider Corroboration)</h3>
             <p className="hint">
-              Register a match. The scoreboard URL must start with an approved prefix and is permanently bound to this game.
+              Register a match with at least 2 independent owner-approved scoreboard providers. Scores are verified and cross-corroborated by AI validators.
             </p>
             <div className="row">
               <input
@@ -263,14 +265,18 @@ export default function App() {
             </div>
             <div className="row" style={{ marginTop: 8 }}>
               <input
-                style={{ flex: 2 }}
-                placeholder="https://approved-source.example/game-123.json"
-                value={newSource}
-                onChange={(e) => setNewSource(e.target.value)}
+                placeholder="Provider 1: https://provider-a.example/game.json"
+                value={newSourceA}
+                onChange={(e) => setNewSourceA(e.target.value)}
+              />
+              <input
+                placeholder="Provider 2: https://provider-b.example/game.json"
+                value={newSourceB}
+                onChange={(e) => setNewSourceB(e.target.value)}
               />
               <button
                 onClick={createGame}
-                disabled={busy === 'create' || !newId.trim() || !newDesc.trim() || !newSource.trim()}
+                disabled={busy === 'create' || !newId.trim() || !newDesc.trim() || !newSourceA.trim() || !newSourceB.trim()}
               >
                 {busy === 'create' ? 'Creating…' : 'Register Game'}
               </button>
@@ -282,7 +288,7 @@ export default function App() {
       <section className="card">
         <h2>Trigger Match Settlement</h2>
         <p className="hint">
-          Anyone can trigger consensus once a match finishes. Validators independently fetch the bound scoreboard and verify scores.
+          Anyone can trigger consensus once a match finishes. Validators independently fetch all bound scoreboards, check event identity, and corroborate final scores.
         </p>
         <div className="row">
           <input
@@ -321,7 +327,7 @@ export default function App() {
             <thead>
               <tr>
                 <th>ID</th>
-                <th>Match</th>
+                <th>Match & Providers</th>
                 <th>Status</th>
                 <th>Score</th>
                 <th>Winner</th>
@@ -334,9 +340,9 @@ export default function App() {
                   <td className="mono">{g.id}</td>
                   <td>
                     <strong>{g.description || '—'}</strong>
-                    {g.source_url && (
-                      <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>
-                        Source: {g.source_url}
+                    {g.sources && g.sources.length > 0 && (
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                        Corroborating Providers ({g.sources.length}): {g.sources.join(', ')}
                       </div>
                     )}
                   </td>
