@@ -51,18 +51,29 @@ def test_create_game_requires_at_least_two_approved_sources(
     direct_vm.sender = direct_alice
 
     # Only 1 source -> rejected
-    with direct_vm.expect_revert("At least 2 independent source URLs required"):
+    with direct_vm.expect_revert("At least 2 independent provider source URLs required"):
         contract.create_game("g-single", DESCRIPTION, [SCORE_URL_A])
 
     # Unapproved source -> rejected
     with direct_vm.expect_revert("not owner-approved"):
         contract.create_game("g-unapproved", DESCRIPTION, [SCORE_URL_A, "https://evil.com/fake.json"])
 
-    # Duplicate sources -> rejected
+    # Duplicate exact URL -> rejected
     with direct_vm.expect_revert("Duplicate source URL"):
         contract.create_game("g-dup", DESCRIPTION, [SCORE_URL_A, SCORE_URL_A])
 
-    # Valid 2 independent sources -> accepted
+    # Two different URLs from the SAME provider prefix -> rejected (must be distinct independent providers)
+    with direct_vm.expect_revert("distinct independent provider"):
+        contract.create_game(
+            "g-same-provider",
+            DESCRIPTION,
+            [
+                "https://provider-a.example.com/endpoint1.json",
+                "https://provider-a.example.com/endpoint2.json",
+            ],
+        )
+
+    # Valid 2 independent sources on distinct approved providers -> accepted
     _create_game(direct_vm, contract, direct_alice, "game-1")
     assert contract.total_games() == 1
 
