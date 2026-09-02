@@ -36,6 +36,20 @@ def _handle_leader_error(leaders_res, leader_fn) -> bool:
 		return False
 
 
+def _extract_hostname(url: str) -> str:
+	clean = str(url).strip().lower()
+	if clean.startswith("https://"):
+		clean = clean[8:]
+	elif clean.startswith("http://"):
+		clean = clean[7:]
+	else:
+		return ""
+	for sep in ["/", ":", "?", "#"]:
+		if sep in clean:
+			clean = clean.split(sep, 1)[0]
+	return clean.strip()
+
+
 @allow_storage
 @dataclass
 class Game:
@@ -100,6 +114,9 @@ class SportsScoreOracle(gl.Contract):
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} Source prefix must be an https URL")
 		if not clean_name:
 			raise gl.vm.UserError(f"{ERROR_EXPECTED} Source name must not be empty")
+		host = _extract_hostname(clean_prefix)
+		if not host:
+			raise gl.vm.UserError(f"{ERROR_EXPECTED} Invalid hostname in prefix: {url_prefix}")
 		self.approved_sources[clean_prefix] = clean_name
 
 	@gl.public.write
@@ -144,22 +161,26 @@ class SportsScoreOracle(gl.Contract):
 
 		clean_sources = []
 		seen_urls = set()
-		seen_providers = set()
+		seen_hosts = set()
 		for i in range(len(source_urls)):
 			url = str(source_urls[i]).strip()
 			if not url:
 				raise gl.vm.UserError(f"{ERROR_EXPECTED} Source URL cannot be empty")
-			provider_prefix = self._get_matching_provider_prefix(url)
-			if not provider_prefix:
+			if not self._is_url_approved(url):
 				raise gl.vm.UserError(f"{ERROR_EXPECTED} Scoreboard source is not owner-approved: {url}")
 			if url in seen_urls:
 				raise gl.vm.UserError(f"{ERROR_EXPECTED} Duplicate source URL in registration")
-			if provider_prefix in seen_providers:
+			
+			host = _extract_hostname(url)
+			if not host:
+				raise gl.vm.UserError(f"{ERROR_EXPECTED} Invalid hostname in source URL: {url}")
+			if host in seen_hosts:
 				raise gl.vm.UserError(
-					f"{ERROR_EXPECTED} Each source URL must represent a distinct independent provider (duplicate provider endpoint: {provider_prefix})"
+					f"{ERROR_EXPECTED} Each source URL must originate from a distinct independent host/domain (duplicate host: {host})"
 				)
+			
 			seen_urls.add(url)
-			seen_providers.add(provider_prefix)
+			seen_hosts.add(host)
 			clean_sources.append(url)
 
 		self.games[clean_id] = Game(
@@ -225,19 +246,19 @@ class SportsScoreOracle(gl.Contract):
 				if home < 0 or away < 0:
 					continue
 
-				provider_prefix = self._get_matching_provider_prefix(url)
+				host = _extract_hostname(url)
 				valid_reports.append({
 					"home": int(home),
 					"away": int(away),
 					"source": url,
-					"provider": provider_prefix,
+					"host": host,
 				})
 
-			# Multi-Provider Corroboration: must have at least MIN_SOURCES distinct providers
-			distinct_providers = set(r["provider"] for r in valid_reports if r["provider"])
-			if len(distinct_providers) < MIN_SOURCES:
+			# Multi-Provider Corroboration: must have at least MIN_SOURCES distinct hostnames
+			distinct_hosts = set(r["host"] for r in valid_reports if r["host"])
+			if len(distinct_hosts) < MIN_SOURCES:
 				raise gl.vm.UserError(
-					f"{ERROR_TRANSIENT} Insufficient live independent provider reports ({len(distinct_providers)}/{MIN_SOURCES} distinct providers required) for game {clean_id}"
+					f"{ERROR_TRANSIENT} Insufficient live independent provider reports ({len(distinct_hosts)}/{MIN_SOURCES} distinct hosts required) for game {clean_id}"
 				)
 
 			# All independent providers must corroborate the exact same final scores
@@ -252,7 +273,7 @@ class SportsScoreOracle(gl.Contract):
 			return {
 				"home": int(target_home),
 				"away": int(target_away),
-				"corroborated": len(distinct_providers),
+				"corroborated": len(distinct_hosts),
 			}
 
 		def validator_fn(leaders_res: gl.vm.Result) -> bool:

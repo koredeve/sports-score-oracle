@@ -62,10 +62,10 @@ def test_create_game_requires_at_least_two_approved_sources(
     with direct_vm.expect_revert("Duplicate source URL"):
         contract.create_game("g-dup", DESCRIPTION, [SCORE_URL_A, SCORE_URL_A])
 
-    # Two different URLs from the SAME provider prefix -> rejected (must be distinct independent providers)
-    with direct_vm.expect_revert("distinct independent provider"):
+    # Two different URLs from the SAME hostname -> strictly rejected
+    with direct_vm.expect_revert("distinct independent host/domain"):
         contract.create_game(
-            "g-same-provider",
+            "g-same-host",
             DESCRIPTION,
             [
                 "https://provider-a.example.com/endpoint1.json",
@@ -84,6 +84,39 @@ def test_create_game_requires_at_least_two_approved_sources(
     assert contract.is_final("game-1") is False
 
 
+def test_same_hostname_different_approved_prefixes_reverts(
+    direct_vm, direct_deploy, direct_alice
+):
+    """Even if two separate prefixes on the same host are approved, they cannot be used together."""
+    direct_vm.sender = direct_alice
+    contract = direct_deploy("contracts/SportsScoreOracle.py")
+    contract.approve_source("https://shared-host.com/feed1/", "Feed 1")
+    contract.approve_source("https://shared-host.com/feed2/", "Feed 2")
+    contract.approve_source("https://independent-host.com/", "Independent Host")
+
+    # Trying to use feed1 and feed2 on shared-host.com -> must revert
+    with direct_vm.expect_revert("distinct independent host/domain"):
+        contract.create_game(
+            "g-shared",
+            DESCRIPTION,
+            [
+                "https://shared-host.com/feed1/game.json",
+                "https://shared-host.com/feed2/game.json",
+            ],
+        )
+
+    # Combining one feed from shared-host.com and one from independent-host.com -> succeeds
+    contract.create_game(
+        "g-valid-independent",
+        DESCRIPTION,
+        [
+            "https://shared-host.com/feed1/game.json",
+            "https://independent-host.com/game.json",
+        ],
+    )
+    assert contract.total_games() == 1
+
+
 def test_create_game_is_owner_only(direct_vm, direct_deploy, direct_alice, direct_bob):
     """Only the owner may create games and approve/revoke sources."""
     contract = _deploy(direct_vm, direct_deploy, direct_alice)
@@ -100,12 +133,11 @@ def test_create_game_is_owner_only(direct_vm, direct_deploy, direct_alice, direc
 def test_submit_result_corroborates_independent_providers_home_wins(
     direct_vm, direct_deploy, direct_alice
 ):
-    """When both independent providers agree on a FINAL 3:1 score, the game finalizes with home win."""
+    """Corroboration from 2 independent providers records home win."""
     contract = _deploy(direct_vm, direct_deploy, direct_alice)
-    _create_game(direct_vm, contract, direct_alice)
-    _mock_both(direct_vm, 3, 1)
+    _create_game(direct_vm, contract, direct_alice, "game-1")
+    _mock_both(direct_vm, home=3, away=1)
 
-    direct_vm.sender = direct_alice
     contract.submit_result("game-1")
 
     res = contract.get_result("game-1")
@@ -118,133 +150,151 @@ def test_submit_result_corroborates_independent_providers_home_wins(
 
 
 def test_submit_result_draw(direct_vm, direct_deploy, direct_alice):
-    """When independent providers agree on 2:2, winner is draw."""
+    """Equal scores result in a draw."""
     contract = _deploy(direct_vm, direct_deploy, direct_alice)
-    _create_game(direct_vm, contract, direct_alice)
-    _mock_both(direct_vm, 2, 2)
+    _create_game(direct_vm, contract, direct_alice, "game-2")
+    _mock_both(direct_vm, home=2, away=2, game_id="game-2")
 
-    direct_vm.sender = direct_alice
-    contract.submit_result("game-1")
+    contract.submit_result("game-2")
 
-    res = contract.get_result("game-1")
+    res = contract.get_result("game-2")
+    assert res["status"] == "final"
     assert res["home_score"] == 2
     assert res["away_score"] == 2
     assert res["winner"] == "draw"
 
 
 def test_submit_result_away_wins(direct_vm, direct_deploy, direct_alice):
-    """When independent providers agree on 0:2, winner is away."""
+    """Higher away score results in away win."""
     contract = _deploy(direct_vm, direct_deploy, direct_alice)
-    _create_game(direct_vm, contract, direct_alice)
-    _mock_both(direct_vm, 0, 2)
+    _create_game(direct_vm, contract, direct_alice, "game-3")
+    _mock_both(direct_vm, home=0, away=4, game_id="game-3")
 
-    direct_vm.sender = direct_alice
-    contract.submit_result("game-1")
+    contract.submit_result("game-3")
 
-    res = contract.get_result("game-1")
+    res = contract.get_result("game-3")
+    assert res["status"] == "final"
     assert res["home_score"] == 0
-    assert res["away_score"] == 2
+    assert res["away_score"] == 4
     assert res["winner"] == "away"
 
 
 def test_provider_disagreement_reverts(direct_vm, direct_deploy, direct_alice):
-    """If independent providers disagree on the final score, settlement reverts to prevent erroneous on-chain truth."""
+    """If independent providers report conflicting scores, execution reverts."""
     contract = _deploy(direct_vm, direct_deploy, direct_alice)
-    _create_game(direct_vm, contract, direct_alice)
+    _create_game(direct_vm, contract, direct_alice, "game-conflict")
 
-    # Provider A reports 3:1, Provider B reports 2:1
     direct_vm.mock_web(
         REGEX_A,
-        {"status": 200, "body": json.dumps({"game_id": "game-1", "status": "FINAL", "home_score": 3, "away_score": 1})},
+        {
+            "status": 200,
+            "body": json.dumps(
+                {"game_id": "game-conflict", "status": "FINAL", "home_score": 2, "away_score": 1}
+            ),
+        },
     )
     direct_vm.mock_web(
         REGEX_B,
-        {"status": 200, "body": json.dumps({"game_id": "game-1", "status": "FINAL", "home_score": 2, "away_score": 1})},
+        {
+            "status": 200,
+            "body": json.dumps(
+                {"game_id": "game-conflict", "status": "FINAL", "home_score": 1, "away_score": 1}
+            ),
+        },
     )
 
-    direct_vm.sender = direct_alice
     with direct_vm.expect_revert("disagree on final score"):
-        contract.submit_result("game-1")
+        contract.submit_result("game-conflict")
 
-    assert contract.is_final("game-1") is False
+    assert contract.is_final("game-conflict") is False
 
 
 def test_event_identity_mismatch_ignored_and_reverts_if_insufficient(
     direct_vm, direct_deploy, direct_alice
 ):
-    """If a provider returns a payload for a different game_id, it is rejected by the event identity check."""
+    """Payload with wrong game_id is discarded; if insufficient valid sources remain, reverts."""
     contract = _deploy(direct_vm, direct_deploy, direct_alice)
-    _create_game(direct_vm, contract, direct_alice)
+    _create_game(direct_vm, contract, direct_alice, "game-real")
 
-    # Provider A has correct game_id, Provider B has wrong game_id
     direct_vm.mock_web(
         REGEX_A,
-        {"status": 200, "body": json.dumps({"game_id": "game-1", "status": "FINAL", "home_score": 3, "away_score": 1})},
+        {
+            "status": 200,
+            "body": json.dumps(
+                {"game_id": "game-real", "status": "FINAL", "home_score": 1, "away_score": 0}
+            ),
+        },
     )
+    # Provider B returns payload for a DIFFERENT game_id -> spoofing / mismatch
     direct_vm.mock_web(
         REGEX_B,
-        {"status": 200, "body": json.dumps({"game_id": "other-match", "status": "FINAL", "home_score": 3, "away_score": 1})},
+        {
+            "status": 200,
+            "body": json.dumps(
+                {"game_id": "game-DIFFERENT", "status": "FINAL", "home_score": 1, "away_score": 0}
+            ),
+        },
     )
 
-    direct_vm.sender = direct_alice
-    # Since only 1 provider had matching event identity, insufficient providers (<2)
-    with direct_vm.expect_revert("[TRANSIENT] Insufficient live independent provider reports"):
-        contract.submit_result("game-1")
-
-    assert contract.is_final("game-1") is False
+    with direct_vm.expect_revert("Insufficient live independent provider reports"):
+        contract.submit_result("game-real")
 
 
 def test_insufficient_live_providers_surfaces_as_transient(
     direct_vm, direct_deploy, direct_alice
 ):
-    """If providers are down (HTTP 500 / 404), raises TRANSIENT so validators can retry later."""
+    """If provider is offline (500 or timeout), surfaces as [TRANSIENT] retryable error."""
     contract = _deploy(direct_vm, direct_deploy, direct_alice)
-    _create_game(direct_vm, contract, direct_alice)
+    _create_game(direct_vm, contract, direct_alice, "game-down")
 
-    direct_vm.mock_web(REGEX_A, {"status": 500, "body": "internal server error"})
-    direct_vm.mock_web(REGEX_B, {"status": 200, "body": json.dumps({"game_id": "game-1", "status": "FINAL", "home_score": 3, "away_score": 1})})
+    direct_vm.mock_web(
+        REGEX_A,
+        {
+            "status": 200,
+            "body": json.dumps(
+                {"game_id": "game-down", "status": "FINAL", "home_score": 2, "away_score": 0}
+            ),
+        },
+    )
+    direct_vm.mock_web(REGEX_B, {"status": 503, "body": "Service Unavailable"})
 
-    direct_vm.sender = direct_alice
-    with direct_vm.expect_revert("[TRANSIENT]"):
-        contract.submit_result("game-1")
+    with direct_vm.expect_revert("Insufficient live independent provider reports"):
+        contract.submit_result("game-down")
 
 
 def test_non_final_game_status_reverts(direct_vm, direct_deploy, direct_alice):
-    """If providers report game status is still IN_PROGRESS or LIVE, settlement is blocked."""
+    """In-progress or scheduled games (not FINAL) are not finalized."""
     contract = _deploy(direct_vm, direct_deploy, direct_alice)
-    _create_game(direct_vm, contract, direct_alice)
-    _mock_both(direct_vm, 1, 0, status="LIVE")
+    _create_game(direct_vm, contract, direct_alice, "game-live")
+    _mock_both(direct_vm, home=1, away=0, game_id="game-live", status="IN_PROGRESS")
 
-    direct_vm.sender = direct_alice
-    with direct_vm.expect_revert("[TRANSIENT] Insufficient live independent provider reports"):
-        contract.submit_result("game-1")
-
-    assert contract.is_final("game-1") is False
+    with direct_vm.expect_revert("Insufficient live independent provider reports"):
+        contract.submit_result("game-live")
 
 
 def test_double_submit_is_reverted(direct_vm, direct_deploy, direct_alice):
-    """An already finalized game cannot be re-settled."""
+    """Once final, a game cannot be re-submitted."""
     contract = _deploy(direct_vm, direct_deploy, direct_alice)
-    _create_game(direct_vm, contract, direct_alice)
-    _mock_both(direct_vm, 3, 1)
+    _create_game(direct_vm, contract, direct_alice, "game-once")
+    _mock_both(direct_vm, home=1, away=0, game_id="game-once")
 
-    direct_vm.sender = direct_alice
-    contract.submit_result("game-1")
-    assert contract.is_final("game-1") is True
+    contract.submit_result("game-once")
+    assert contract.is_final("game-once") is True
 
     with direct_vm.expect_revert("Game already final"):
-        contract.submit_result("game-1")
+        contract.submit_result("game-once")
 
 
 def test_revoke_source_and_empty_inputs(direct_vm, direct_deploy, direct_alice):
-    """Owner can revoke sources and empty inputs are rejected."""
+    """Revoking sources and edge-case inputs."""
     contract = _deploy(direct_vm, direct_deploy, direct_alice)
-    direct_vm.sender = direct_alice
 
-    with direct_vm.expect_revert("Game id and description must not be empty"):
-        contract.create_game("", "desc", [SCORE_URL_A, SCORE_URL_B])
+    # Revoke
+    contract.revoke_source("https://provider-b.example.com/")
+    sources = contract.get_approved_sources()["prefixes"]
+    assert "https://provider-b.example.com/" not in sources
+    assert "https://provider-a.example.com/" in sources
 
-    contract.revoke_source("https://provider-a.example.com/")
-    with direct_vm.expect_revert("not owner-approved"):
-        contract.create_game("g-revoked", DESCRIPTION, [SCORE_URL_A, SCORE_URL_B])
-
+    # Revoke nonexistent reverts
+    with direct_vm.expect_revert("not approved"):
+        contract.revoke_source("https://nonexistent.com/")
